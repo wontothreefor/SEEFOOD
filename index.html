@@ -127,9 +127,17 @@ const speakBtn = document.getElementById('speak');
 
 let model = null;
 let lastLine = '';      // remembers what to say when the speaker button is tapped
+let busy = false;       // ignore new taps while one photo is still classifying
+let lastURL = null;     // so we can free the previous photo from memory
+
+// offscreen 224x224 canvas: the model only ever sees this tiny copy, never the full photo
+const small = document.createElement('canvas');
+small.width = 224; small.height = 224;
+const sctx = small.getContext('2d');
 
 // ---------- 1. load + warm up the model ----------
 async function init(){
+  tf.env().set('WEBGL_DELETE_TEXTURE_THRESHOLD', 0);        // free GPU memory aggressively on phones
   model = await mobilenet.load({version: 2, alpha: 1.0});   // MobileNet v2, full width
   const warm = tf.zeros([224, 224, 3]);                     // dummy image
   await model.classify(warm);                               // forces shader compile now
@@ -161,37 +169,46 @@ speakBtn.addEventListener('click', () => { if(lastLine) say(lastLine); });
 // ---------- 3. when a photo is chosen, classify it ----------
 file.addEventListener('change', async (e) => {
   const f = e.target.files[0];
-  if(!f || !model) return;
+  if(!f || !model || busy) return;     // one at a time
+  busy = true;
+  try {
+    if(lastURL) URL.revokeObjectURL(lastURL);   // free the previous photo from memory
+    lastURL = URL.createObjectURL(f);
+    photo.src = lastURL;
+    await photo.decode();              // full image, shown in the result card only
+    stage.style.display = 'flex';
+    detail.textContent = 'Thinking';
 
-  photo.src = URL.createObjectURL(f);
-  await photo.decode();                 // wait until the image is actually loaded
-  stage.style.display = 'flex';
-  detail.textContent = 'Thinking';
+    // shrink to 224x224 first: this is the line that stops the low-memory crash
+    sctx.drawImage(photo, 0, 0, 224, 224);
 
-  const preds = await model.classify(photo, 5);   // top 5 guesses, highest first
-  const top = preds[0];
-  const label = top.className.toLowerCase();
-  const isHotdog = label.includes('hotdog') || label.includes('hot dog');
+    const preds = await model.classify(small, 5);   // classify the tiny copy, highest first
+    const top = preds[0];
+    const label = top.className.toLowerCase();
+    const isHotdog = label.includes('hotdog') || label.includes('hot dog');
 
-  // first synonym only -> "tabby, tabby cat" becomes "tabby"
-  const item = top.className.split(',')[0].trim();
+    // first synonym only -> "tabby, tabby cat" becomes "tabby"
+    const item = top.className.split(',')[0].trim();
 
-  if(isHotdog){
-    banner.className = 'banner hit';
-    icon.innerHTML = CHECK;
-    verdict.textContent = 'Hotdog';
-    caption.textContent = '';
-    lastLine = 'This is hotdog.';
-  } else {
-    banner.className = 'banner miss';
-    icon.innerHTML = CROSS;
-    verdict.textContent = 'Not hotdog';
-    caption.textContent = `This is ${item.toLowerCase()}`;
-    lastLine = `This is ${item.toLowerCase()}.`;
+    if(isHotdog){
+      banner.className = 'banner hit';
+      icon.innerHTML = CHECK;
+      verdict.textContent = 'Hotdog';
+      caption.textContent = '';
+      lastLine = 'This is hotdog.';
+    } else {
+      banner.className = 'banner miss';
+      icon.innerHTML = CROSS;
+      verdict.textContent = 'Not hotdog';
+      caption.textContent = `This is ${item.toLowerCase()}`;
+      lastLine = `This is ${item.toLowerCase()}.`;
+    }
+
+    say(lastLine);
+    detail.textContent = `top guess: ${item} (${Math.round(top.probability*100)}%)`;
+  } finally {
+    busy = false;
   }
-
-  say(lastLine);
-  detail.textContent = `top guess: ${item} (${Math.round(top.probability*100)}%)`;
 });
 </script>
 </body>
